@@ -1,0 +1,2 @@
+#!/bin/sh
+objdump -D -b binary -mi386 -M intel "$@"
