@@ -24,47 +24,49 @@
 	org 0x0
 	bits 16
 	jmp 0x7c0:start 	; set (cs,ip) = (0x7c0, start)
-start:	
+	
+	;; prepare to copy sector at 0x7c0:0x0000 to 0x060:0x0000
+start:
 	mov bx, 0x7c0
 	mov ds, bx
+	xor bx, bx
+	jmp copy_sector
 	
-set_video_mode:	
-	mov ah, 0x0 		; int 0 -> set video mode
-	mov al, VIDEO_MODE      ; 40 x 25 16 color text
-	int 0x10
+	;; copy sector
+copy_sector:
+	cmp bx, 512
+	je prepare_to_load
+	mov ah, [0x7c0:bx]
+	mov [0x060:bx], ah
+	incr bx
+	jmp copy_sector
 	
-clear_screen:
-	mov ah, 0x6 		; int 0x6 -> scroll window
-	mov al, 0 		; al=0 means blank the region
-	xor ch, ch 		; upper left row = 0
-	xor cl, 0		; leftmost column = 0
-	mov dh, VIDEO_HEIGHT-1 	; account for zero indexing with -1
-	mov dl, VIDEO_WIDTH-1 
-	int 0x10 		; clear window
+	;; begin executing from 'new' sector
+prepare_to_load:	
+	mov bx, 0x060
+	mov ds, bx
+	jmp 0x060:newstart
 	
-prepare_message:	
-	mov bx, message
-	mov ah, 0x0e 		; ah 0xe -> print char to screen
+newstart:
+	mov bx, 451
+	jmp findpart
+	
+	;; find active partition
+findpart:
+	add bx, 16
+	cmp bx, 510
+	jge no_active_part
+	mov ah, [bx]
+	and ah,0x80
+	jz findpart
+	jmp found_part
 
-printstring:
-	mov al, [bx]		; get char
-	and al, al 		; if its zero, exit
-	jz wait_keypress
-	add bx, 1 		; incr string
-	int 0x10 		; print char
-	jmp printstring
-	
-wait_keypress: 			; wait for user to press 'r', then reboot
-	mov ah, 0x00
-	int 0x16
-	cmp al, 'r'
-	jne wait_keypress
-	
-reboot:
-	int 0x19
+	;; stop the system
+found_part:		
 	hlt
+	jmp found_part
+
 	
-message:
 	db `Welcome to RunicOS!\n\rI haven't been implemented yet...\n\rPress 'r' to reboot: `
 	times 510-($-$$) db 0 
 	dw 0xaa55 		; magic numbers for boot segment
