@@ -1,4 +1,4 @@
-AS=nasm -fbin
+AS=nasm -fbin -Wall
 
 bld.bin: bld.asm
 	$(AS) bld.asm -o bld.bin
