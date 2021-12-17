@@ -39,6 +39,11 @@
 	; dl: drive number
 	; es:bx: address of user buffer
 	; returns cf = 0 on success, cf = 1 on failure (carry flag)
+
+
+%define VIDEO_MODE 0x3
+%define VIDEO_WIDTH 25
+%define VIDEO_HEIGHT 80
 	
 %define ptable_start 446
 	org 0x0
@@ -47,94 +52,165 @@
 	
 	;; prepare to copy sector at 0x7c0:0x0000 to 0x060:0x0000
 start:
-	;; set data segment to 0x7c0:0x0
+	
+	;; set data segment to point to code segment 0x7c0:0x0
 	mov bx, 0x7c0
 	mov ds, bx
+	;;  store drive number (in dl) at the last byte of the 512 byte segment
 	mov [ds:511], dl
-	;; set es segment to 0x060:0x0
-	mov bx, 0x060
-	mov es, bx
-	xor bx, bx
-	;; clear some flags
+
+	;; clear interrupt and direction flags
 	cli
 	cld
-	jmp copy_sector
 	
-	;; copy sector
+	;; set video mode
+	mov ah, 0x0 		; int 0 -> set video mode
+	mov al, VIDEO_MODE      ; 40 x 25 16 color text
+	int 0x10
+	
+	;; clear screen
+	mov ah, 0x6 		; int 0x6 -> scroll window
+	mov al, 0 		; al=0 means blank the region
+	xor ch, ch		; leftmost column = 0
+	xor cl, 0
+	mov dh, VIDEO_HEIGHT-1 	; account for zero indexing with -1
+	mov dl, VIDEO_WIDTH-1 
+	int 0x10 		; clear window
+
+	
+	;; set up segment (es) where MBR will be copied to (0x060:0x0)
+	mov bx, 0x060
+	mov es, bx
+	
+
+	;; set bx to point to start of sector, to start copying
+	xor bx, bx	
+
+	;; copy 512 byte MBR from initial 0x7c0:0x0 location to new location at 0x060:0x0
+	;; this is so that we may read in a VBR to 0x7c0:0x0
 	
 copy_sector:
-	;; copy 512 bytes from 0x7c0:0x0 to 0x060:0x0
+	;; finish copying if we've copied 512 bytes
 	cmp bx, 512
 	je relocate
+
+	;; copy one byte from ds sector to es sector
 	mov ah, [ds:bx]
 	mov [es:bx], ah
+
+	;; move bx to point to the next byte, and loop
 	inc bx
 	jmp copy_sector
 	
-	;; begin executing from 'new' sector
-relocate:	
+
+	;; set code segment and data segment to point to freshly copied segment 0x060:0x0
+relocate:
+	
+	;; set the data segment
 	mov bx, 0x060
-	mov ds, bx 		;set data segment to 0x060
+	mov ds, bx
+	mov sp, 446
+
+	;; (implicitly) set code segment through this jump	
 	jmp 0x060:find_active_partition
 
-	;; determine which of the 4 possible partitions is active, and
-	;; store result (0,1,2,3) in ax, or -1 if no active partition
+	;; find first active entry in partition table and interpret it
 find_active_partition:
+	;; set up bx for looping through each of 4 entries
 	mov bx, ptable_start - 16
 	jmp find_active_partition0
-	
+
 find_active_partition0:
+	;; go to next part table entry (or zeroeth one on first iteration)
 	add bx, 16
+
+	;; if we've gone past the end of the table, exit with error
 	cmp bx, 510
 	jge no_active_partition
+
+	;; if the part. table entry is not active, go to the next entry
 	mov ah, [bx]
 	and ah,0x80
 	jz find_active_partition0
 	jmp load_part_parameters
-	
+
+	;; print 'n' (used if there is no active partiion)
 no_active_partition:	
-	mov ah, 0x0e
-	mov al, 'n'
-	int 0x10
-	hlt
+	mov si, no_active_partition_message
+	call print_message
+	jmp prompt_reboot
 	
-	;; load parameters from partition table entry into dh, cx, al, ah, and es.
-	;; dh: chd address
+	;; load partition parameters from active part. table entry to prepare
+	;; for a disk read BIOS call
 load_part_parameters:
-	add bx,1
-	mov dh, [ds:bx] 		;set head number
+	add bx,1  		;set bx to point to chs address of VBR sector
+	mov dh, [ds:bx] 	;set head number
 	mov cl, [ds:bx + 1] 	;set sector number + upper bits cylinder number
 	mov ch, [ds:bx + 2] 	;set lower bits of cylinder number
-	mov dl, [ds:511] 		;set drive type from where it was set initially
-	mov bx, 0x7c0 		;initialize sector where VBR will be read into
-	mov es, bx 		;  ^^
+	mov dl, [ds:511] 	;set drive type (dl was stored at ds:511 at start of bootloader program)
+	
+	mov bx, 0x7c0 		;set up location to which VBR should be read
+	mov es, bx
+	
 try_read_sector:
-	xor bx, bx 		;  ^^	
+	xor bx, bx
 	mov ah, 0x2		;set bios call to DISK BIOS: READ DISK SECTORS
-	mov al, 1 		;set num sectors to read = 1 (is this reliable?)
-	int 0x13 		;read sector
+	mov al, 1 		;set num sectors to read = 1
+	int 0x13 		;read sector (BIOS call 0x13)
+
+	;; if carry flag is set (indicating error), print error message
 	adc bh, bh
 	jnz status_error
+	
+	;; otherwise, print success message
 	jmp status_success
 
 	
+	;; print 'b' to the screen and halt(used on bad disk read)
 status_error:
-	mov ah, 0x0e
-	mov al,'b'
-	cli
-	int 0x10
-	hlt
+	mov si, disk_failure_message
+	call print_message
+	jmp prompt_reboot
 	
-status_success:
+print_message:	
+	lodsb
+	and al, al
+	jnz print_message0
+	ret
+print_message0:	
 	mov ah, 0x0e
-	mov al, 'g'
-	cli
+	mov bx, 7
 	int 0x10
-	hlt
+	jmp print_message
 
 	
+status_success:
+	mov si, welcome_message
+	call print_message
 	
-	db `Welcome to RunicOS!\n\rI haven't been implemented yet...\n\rPress 'r' to reboot: `
+prompt_reboot:
+	mov si, reboot_prompt_message
+	call print_message
+	jmp reboot_on_keypress
+	
+reboot_on_keypress:
+	mov ah, 0x0
+	int 0x16
+	int 0x19
+	
+die:
+	hlt
+	
+
+
+no_active_partition_message:
+	db `No active partition found...\n\r\0`
+disk_failure_message:
+	db `Disk read failure...\n\r\0`
+welcome_message:	
+	db `Welcome to RunicOS!\n\rDisk read success...\n\r\0`	
+reboot_prompt_message:	
+	db `Press any key to reboot: \0`
 	times 446-($-$$) db 0
 	db 0x80,0x00,0x02,0x00,   0x02,  0x00,0x02,0x00, 0x00,0x00,0x00,0x00, 0x01,0x00,0x00,0x00
 	db 0x00,0x00,0x01,0x00,   0x00,  0x00,0x01,0x00, 0x00,0x00,0x00,0x00, 0x01,0x00,0x00,0x00
